@@ -54,6 +54,31 @@ For more cat maintenance tips, tap to view the website!</p>
 </article>
 """
 
+def retrieve_all_timeline_items(service):
+  """Retrieve all timeline items for the current user.
+
+  Args:
+    service: Authorized Mirror service.
+
+  Returns:
+    Collection of timeline items on success, None otherwise.
+  """
+  result = []
+  request = service.timeline().list()
+  while request:
+    try:
+      timeline_items = request.execute()
+      items = timeline_items.get('items', [])
+      if items:
+        result.extend(timeline_items.get('items', []))
+        request = service.timeline().list_next(request, timeline_items)
+      else:
+        # No more items to retrieve.
+        break
+    except errors.HttpError, error:
+      print 'An error occurred: %s' % error
+      break
+  return result
 
 class _BatchCallback(object):
   """Class used to track batch request responses."""
@@ -275,8 +300,50 @@ class MainHandler(webapp2.RequestHandler):
     self.mirror_service.timeline().delete(id=self.request.get('itemId')).execute()
     return 'A timeline item has been deleted.'
 	
+class SendUrlHandler(webapp2.RequestHandler):
+  def _render_template(self, message=None):
+    """Render the main page template."""
+    template_values = {}
 
+    template = jinja_environment.get_template('templates/index.html')
+    self.response.out.write(template.render(template_values))
+
+  def get(self):
+    video_url = self.request.get("url")
+
+    """Render the main page."""
+    logging.info('Inserting timeline item to all users')
+    users = Credentials.all()
+    total_users = users.count()
+
+    if total_users > 10:
+      return 'Total user count is %d. Aborting broadcast to save your quota' % (
+          total_users)
+
+    body = {
+        'notification': {'level': 'DEFAULT'}, 
+        'text': video_url,
+    }
+    if 'youtube' in video_url:
+        body['menuItems'] = [{'action' : 'PLAY_VIDEO', 'payload' : video_url}]
+
+    batch_responses = _BatchCallback()
+    batch = BatchHttpRequest(callback=batch_responses.callback)
+    for user in users:
+      creds = StorageByKeyName(
+          Credentials, user.key().name(), 'credentials').get()
+      mirror_service = util.create_service('mirror', 'v1', creds)
+      timeline = retrieve_all_timeline_items(mirror_service)
+      batch.add(
+          mirror_service.timeline().insert(body=body),
+          request_id=user.key().name())
+
+
+    batch.execute(httplib2.Http())
+
+    self._render_template('')
 
 MAIN_ROUTES = [
-    ('/', MainHandler)
+    ('/', MainHandler),
+    ('/send_url/', SendUrlHandler)
 ]
